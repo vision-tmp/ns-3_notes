@@ -1,0 +1,957 @@
+* Tracing a packet for the case: (UDP, adhoc Wi-Fi, IPv4)
+Here is a brief description of how a packet is sent and received through
+all the layers of the model for a given case (UDP, adhoc Wi-Fi, IPv4).
+Also, see Fig. 1, Fig. 2 of Chapter 17 ("Internet Models")
+and Fig. 1 of Chapter 36 ("Wi-Fi Module")
+in ns-3 Model Library documention (e.g., ns-3-model-library.pdf).
+
+Static logic (explicit function calls) is depicted by arrows by default.
+Run-time logic (callbacks etc) is mentioned by using RTL keyword.
+
+  ========== AppExample (e.g., in main.cc)
+Ptr<Packet> packet = Create<Packet> (...);
+socket->Connect(...);
+socket->Send (packet);
+| ========== UdpSocketImpl (udp-socket-impl.cc)
+v
+Send // wheather connected etc
+{ ... DoSend ... } // pv4Address::IsMatchingType etc
+|
+| /~~~~ RTL ~~~~~ ipv4->GetRoutingProtocol ()->RouteOutput (...)
+v/
+{ ... DoSendTo ... } // Broadcast, route etc
+{ ... m_udp->Send ... }
+| ========== UdpL4Protocol (udp-l4-protocol.cc)
+v
+Send // packet->AddHeader (udpHeader);
+{ ... m_downTarget (...) ... }
+| ========== Ipv4L3Protocol (ipv4-l3-protocol.cc)
+v
+Send // ipHeader (broadcast, route checks)
+{ ... SendRealOut ... } // broadcast, route, fragmentation
+{ ... outInterface->Send (packet, header, destination) ... }
+| ========== Ipv4Interface (ipv4-interface.cc)
+|
+| /~~~~ RTL ~~~~~ ArpL3Protocol::Lookup (...)
+v
+Send // ARP, creating instance of Ipv4QueueDiscItem
+{ ... m_tc->Send (m_device, Create<Ipv4QueueDiscItem> (...)) ... }
+| ========== TrafficControlLayer (traffic-control-layer.cc)
+v
+Send (device, queueDiscItem) // send directly or add it to queue disc
+| \                          // and dequeue a packet stored in the queue
+|  \
+|   device->Send (packet, address, protocol)
+qDisc->Run ()                               \
+| ========== QueueDisc (queue-disc.cc)      |
+v                                           |
+QueueDisc::Restart ()                       |
+|                                           |
+QueueDisc::Transmit (item)                  |
+|                                           |
+m_device->Send (packet, address, protocol)  |
+|                                           |
+| /-----------------------------------------/
+|/
+| ========== NetDevice -> WifiNetDevice (wifi-net-device.cc)
+v
+Send (packet, dest, protocolNumber)
+{ ...  m_mac->Enqueue (packet, realTo) ... }
+| ========== WiFiMac -> AdhocWifiMac (adhoc-wifi-mac.cc)
+v
+Enqueue (packet, mac48Address) // mac header is added
+{ ... m_txop->Queue (packet, header) ... }
+| ========== Txop (txop.cc)
+v
+Queue (packet, header) // enqueue packet to WifiMacQueue
+{ ... StartAccessIfNeeded ...}
+| ========== ChannelAccessManager (channel-access-manager.cc)
+v
+ChannelAccessManager::RequestAccess // This models access to the medium
+{ ... maybe after a period of time: GrantPcfAccess or DoGrantAccess ... }
+| ========== Txop (txop.cc) (through NotifyAccessGranted)
+v
+NotifyAccessGranted // dequeue and prepare for transmission
+{ ... GetLow ()->StartTransmission (packet or fragment, header, ...) ... }
+| ========== MacLow (mac-low.cc)
+v
+StartTransmission // SendDataPacket, SendRtsForPacket etc
+{ ... ForwardDown (packet, ... ) ... }
+{ ... WifiPhy::SendPacket (...) ... }
+| ========== WifiPhy (wifi-phy.cc)
+v
+WifiPhy::SendPacket // CalculateTxDuration etc
+{ ... StartTx (newPacket, txVector, txDuration) ... }
+| ========== YansWifiPhy (yans-wifi-phy.cc)
+v
+YansWifiPhy::StartTx
+{ ... YansWifiChannel::Send (this, packet, power, txDuration) ... }
+| ========== YansWifiChannel (yans-wifi-channel.cc)
+v
+YansWifiChannel::Send // GetDelay, CalcRxPower
+{ ...
+// for all devices in m_phyList
+Simulator::ScheduleWithContext (dstNode,
+delay, &YansWifiChannel::Receive,
+(*i), copy, rxPowerDbm, duration)
+... }
+| // After some duration specified in Schedule
+v
+YansWifiChannel::Receive // for every devices that should receive
+{ ... WifiPhy::StartReceivePreambleAndHeader ... }
+| ========== WifiPhy (wifi-phy.cc)
+v
+StartReceivePreambleAndHeader
+{ ... StartRx ... }
+{ ... Schedule of WifiPhy::EndReceive ... }
+| // After some duration specified in Schedule
+v
+{ ... WifiPhyStateHelper::SwitchFromRxEndOk ... }
+| ========== WifiPhyStateHelper (wifi-phy-state-helper.cc)
+v
+SwitchFromRxEndOk
+{ ... m_rxOkCallback (packet, snr, txVector) ... }
+// m_rxOkCallback == MacLow::DeaggregateAmpduAndReceive
+| ========== MacLow (mac-low.cc)
+v
+DeaggregateAmpduAndReceive
+{ ... ReceiveOk (packet, rxSnr, txVector, ampduSubframe) ... }
+{ ... m_rxCallback (packet, &hdr) ... }
+// m_rxCallback == MacRxMiddle::Receive
+| ========== MacRxMiddle (mac-rx-middle.cc)
+v
+Receive
+{ ... m_callback (aggregate, hdr) ... }
+// m_callback == AdhocWifiMac::Receive
+| ========== AdhocWifiMac (adhoc-wifi-mac.cc)
+v
+Receive
+{ ... RegularWifiMac::ForwardUp ... }
+{ ... m_forwardUp (packet, from, to) ... }
+// m_forwardUp == WifiNetDevice::ForwardUp
+| ========== WifiNetDevice (wifi-net-device.cc)
+v
+ForwardUp
+{ ... m_forwardUp ... }
+// m_forwardUp == Node::NonPromiscReceiveFromDevice
+| ========== Node (node.cc)
+v
+NonPromiscReceiveFromDevice
+{ ... ReceiveFromDevice ... }
+{ ... i->handler (device, packet, protocol, from, to, packetType) ... }
+// i->handler == TrafficControlLayer::Receive
+| ========== TrafficControlLayer (traffic-control-layer.cc)
+v
+Receive
+{ ... i->handler (device, packet, protocol, from, to, packetType) ... }
+// i->handler == Ipv4L3Protocol::Receive
+| ========== Ipv4L3Protocol (ipv4-l3-protocol.cc)
+v
+Receive
+{ ... socket->ForwardUp  // for each raw socket adding to m_recv
+  ... m_routingProtocol->RouteInput // callback Ipv4L3Protocol::LocalDeliver
+... }
+// and in Ipv4L3Protocol::LocalDeliver
+{ ... protocol->Receive (p, ipHeader, GetInterface (iif)) ... }
+// protocol->Receive == UdpL4Protocol::Receive
+| ========== UdpL4Protocol (udp-l4-protocol.cc)
+v
+Receive
+{ ... (*endPoint)->ForwardUp ... } // for each endPoint
+// (*endPoint)->ForwardUp == Ipv4EndPoint::ForwardUp
+{ ... m_rxCallback ... }
+// m_rxCallback == UdpSocketImpl::ForwardUp
+| ========== UdpSocketImpl (udp-socket-impl.cc)
+v
+ForwardUp
+{ ... NotifyDataRecv ... }
+{ ... m_receivedData ... }
+// m_receivedData == callback_from_application
+// e.g.,
+// m_receivedData == AppExample::ReceivePacket
+| ========== AppExample (e.g., in main.cc)
+v
+AppExample::ReceivePacket
+// because of SetRecvCallback (MakeCallback (&AppExample::ReceivePacket, this))
+
+And now this scheme is described with additional details.
+
+** Packet created and started for sending through UDP socket (main.cc)
+
+A packet can be created at a predefined time interval scheduled by
+using "Schedule", or "ScheduleWithContext", or using any other method.
+A socket can be used, for example, UDP socket.
+Example (this and other examples could be in some kind of pseudocode):
+
+TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+Ptr<Socket> socket = Socket::CreateSocket (a_node, tid);
+InetSocketAddress local = InetSocketAddress (GetLocalAddress (a_node), PORT);
+socket->Bind (local);
+socket->Connect (<some_InetSocketAddress_i.e._(IP address, port)>);
+Ptr<Packet> packet = Create<Packet> (uint8_t const*buffer, uint32_t size);
+socket->Send (packet);
+
+** UdpSocketImpl (udp-socket-impl.cc)
+
+This triggers Send -> DoSend -> DoSendTo methods of UdpSocketImpl.
+
+1) Send checks wheather the socket is connected.
+2) DoSend calls Bind if it is needed and checks Ipv4Address::IsMatchingType,
+m_shutdownSend, and then calls DoSendTo (for IPv4 or IPv6).
+3) What's interesting in DoSendTo:
+<...>
+(p is the packet)
+if (p->GetSize () > GetTxAvailable () )
+  {
+    m_errno = ERROR_MSGSIZE;
+    return -1;
+  }
+<...>
+(Add different packet tags)
+<...>
+    m_udp->Send (...);
+(where m_udp is for UdpL4Protocol)
+And also, possibley a route is acquired (RTL):
+Ptr<Ipv4> ipv4 = m_node->GetObject<Ipv4> ();
+<...>
+route = ipv4->GetRoutingProtocol ()->RouteOutput (p, header, oif, errno_);
+<...>
+m_udp->Send (<...>, route); // UdpL4Protocol::Send
+UdpL4Protocol is also can be added in the call of
+InternetStackHelper::Install (Ptr<Node> node)
+(which is in internet-stack-helper.cc), see
+CreateAndAggregateObjectFromTypeId (node, "ns3::UdpL4Protocol");
+
+And routing is added dynamically, for example:
+
+InternetStackHelper internet;
+list.Add (olsr, 100);
+internet.SetRoutingHelper (list);
+internet.Install (nodes);
+
+More specifically in (internet-stack-helper.cc):
+InternetStackHelper::Install (Ptr<Node> node)
+<...>
+CreateAndAggregateObjectFromTypeId (node, "ns3::ArpL3Protocol");
+CreateAndAggregateObjectFromTypeId (node, "ns3::Ipv4L3Protocol");
+CreateAndAggregateObjectFromTypeId (node, "ns3::Icmpv4L4Protocol");
+<...>
+Ptr<Ipv4> ipv4 = node->GetObject<Ipv4> ();
+Ptr<Ipv4RoutingProtocol> ipv4Routing = m_routing->Create (node);
+ipv4->SetRoutingProtocol (ipv4Routing);
+
+** UdpL4Protocol (udp-l4-protocol.cc)
+Send method:
+<...>
+packet->AddHeader (udpHeader);
+<...>
+m_downTarget (packet, saddr, daddr, PROT_NUMBER, route);
+
+UdpL4Protocol::SetDownTarget is used to set m_downTarget and is called
+in UdpL4Protocol::NotifyNewAggregate:
+<...>
+Ptr<Ipv4> ipv4 = this->GetObject<Ipv4> (); //Ipv4L3Protocol
+// and this can be set by
+// CreateAndAggregateObjectFromTypeId (node, "ns3::Ipv4L3Protocol");
+// in InternetStackHelper::Install (Ptr<Node> node) (as an example)
+<...>
+this->SetDownTarget (MakeCallback (&Ipv4::Send, ipv4));
+There is
+class Ipv4L3Protocol : public Ipv4
+and Ipv4::Send is Ipv4L3Protocol::Send (notice that Ipv4::Send(...) = 0)
+in this case.
+Thus m_downTarget (...) is Ipv4L3Protocol::Send (...)
+
+** Ipv4L3Protocol (ipv4-l3-protocol.cc)
+Send method:
+<...>
+// Handle a few cases:
+// 1) packet is destined to limited broadcast address
+// 2) packet is destined to a subnet-directed broadcast address
+// 3) packet is not broadcast, and is passed in with a route entry
+// 4) packet is not broadcast, and is passed in with a route entry but route->GetGateway is not set (e.g., on-demand)
+// 5) packet is not broadcast, and route is NULL (e.g., a raw socket call, or ICMP)
+<...>
+// when packet is not broadcast
+SendRealOut (...)
+Choose the gateway according to route (considering route case).
+Also, does the fragmentation.
+Finally,
+outInterface->Send (packet, header, destination); // Ipv4Interface::Send (...)
+Notice that outInterface is taken from m_interfaces (Ipv4InterfaceList).
+And interfaces can be add in Ipv4AddressHelper::Assign, see:
+int32_t interface = ipv4->GetInterfaceForDevice (device);
+if (interface == -1)
+  {
+    interface = ipv4->AddInterface (device);
+  }
+
+** Ipv4Interface (ipv4-interface.cc)
+Send method:
+<...>
+Ptr<ArpL3Protocol> arp = m_node->GetObject<ArpL3Protocol> ();
+// and this can be set by
+// CreateAndAggregateObjectFromTypeId (node, "ns3::ArpL3Protocol");
+// in InternetStackHelper::Install (Ptr<Node> node) (as a possible way)
+<...>
+// can be
+arp->Lookup (...)
+<...>
+// with or without ARP creating instance of Ipv4QueueDiscItem
+m_tc->Send (m_device, ... ); // Ptr<TrafficControlLayer> m_tc
+
+TrafficControlLayer is also can be added in the call of
+InternetStackHelper::Install (Ptr<Node> node)
+(which is in internet-stack-helper.cc), see
+CreateAndAggregateObjectFromTypeId (node, "ns3::TrafficControlLayer");
+
+** TrafficControlLayer (traffic-control-layer.cc)
+Send (Ptr<NetDevice> device, Ptr<QueueDiscItem> item)
+// Determine the transmission queue of the device for the packet
+// And send directly (if there is no queue for this device)
+device->Send (item->GetPacket (), item->GetAddress (), item->GetProtocol ());
+In this case go to WifiNetDevice (wifi-net-device.cc)
+// or
+// "
+// Enqueue the packet in the queue disc associated with the netdevice queue
+// selected for the packet and try to dequeue packets from such queue disc
+// "
+// and finally send directly through the device
+qDisc->Enqueue (item);
+qDisc->Run (); // calls QueueDisc::Restart (), see QueueDisc (queue-disc.cc)
+
+QueueDisc instances are created in:
+TrafficControlHelper::Install (Ptr<NetDevice> d)
+see:
+Ptr<QueueDisc> q = m_queueDiscFactory[i].CreateQueueDisc (m_queueDiscs);
+q->SetNetDevice (d); // device d is attached to QueueDisc instance to be
+used for the calls "m_device->Send (packet, address, protocol)".
+
+** QueueDisc (queue-disc.cc)
+QueueDisc::Restart ()
+QueueDisc::Transmit (item)
+m_device->Send (packet, address, protocol)
+Thus got to WifiNetDevice (wifi-net-device.cc)
+
+** NetDevice -> WifiNetDevice (wifi-net-device.cc)
+In this case only Wi-Fi is considered.
+WifiNetDevice (as a NetDevice) can be added during the execution of
+WifiHelper::Install (...)
+(which is in wifi-helper.cc), see
+Ptr<WifiNetDevice> device = CreateObject<WifiNetDevice> ();
+Ptr<WifiPhy> phy = phyHelper.Create (node, device);
+node->AddDevice (device);
+
+There is a class
+class WifiNetDevice : public NetDevice
+therefore "device->" or "m_device->" triggers
+WifiNetDevice::Send (packet, dest, protocolNumber)
+where there is:
+m_mac->Enqueue (packet, realTo);
+and it calls one of the subclasses of WiFiMac.
+In this case it is presumed that Wi-Fi is in adhoc mode, therefore consider:
+AdhocWifiMac::Enqueue (Ptr<const Packet> packet, Mac48Address to)
+
+** WiFiMac -> AdhocWifiMac (adhoc-wifi-mac.cc)
+In AdhocWifiMac::Enqueue
+WifiMacHeader hdr is added:
+hdr.SetAddr1 (to);
+hdr.SetAddr2 (m_low->GetAddress ());
+hdr.SetAddr3 (GetBssid ());
+hdr.SetDsNotFrom ();
+hdr.SetDsNotTo ();
+Then packet with header is added to the queue:
+m_edca[QosUtilsMapTidToAc (tid)]->Queue (packet, hdr);
+or
+m_txop->Queue (packet, hdr);
+
+*** How it is made that WiFiMac -> AdhocWifiMac
+Adhoc Wi-Fi can be set in this way.
+WifiMacHelper wifiMac;
+wifiMac.SetType ("ns3::AdhocWifiMac");
+Then
+WifiHelper::Install is called
+and in it:
+Ptr<WifiMac> mac = macHelper.Create ();
+But because of "wifiMac.SetType ("ns3::AdhocWifiMac");" mac is of type
+AdhocWifiMac. This is enabled by this scheme.
+In macHelper.Create ():
+Ptr<WifiMac> mac = m_mac.Create<WifiMac> ();
+But m_mac is ObjectFactory and in ObjectFactory::Create:
+Callback<ObjectBase *> cb = m_tid.GetConstructor ();
+where m_tid is TypeId and TypeId::GetConstructor
+Callback<ObjectBase *>  cb = IidManager::Get ()->GetConstructor (m_tid);
+and finally, in IidManager::GetConstructor:
+struct IidInformation *information = LookupInformation (uid);
+<...>
+return information->constructor;
+Thus this calls the function ("constructor") for this TypeId ("AdhocWifiMac").
+Also, see in adhoc-wifi-mac.cc
+NS_OBJECT_ENSURE_REGISTERED (AdhocWifiMac);
+TypeId
+AdhocWifiMac::GetTypeId (void)
+{
+  static TypeId tid = TypeId ("ns3::AdhocWifiMac")
+    .SetParent<RegularWifiMac> ()
+    .SetGroupName ("Wifi")
+    .AddConstructor<AdhocWifiMac> ()
+  ;
+  return tid;
+}
+where AddConstructor<AdhocWifiMac> () is used which is in type-id.h file.
+The same scheme is used in many other cases (here it is as an example).
+
+** Txop (txop.cc)
+QosTxop is also can be invoked (for QoS case) but for this example assume that
+only Txop is used here and later. Also notice that, by default,
+WifiMacHelper::WifiMacHelper creates "an AdHoc MAC layer without QoS".
+
+Txop class handles fragmentation and retransmissions.
+In Txop::Queue (packet, header):
+<...>
+m_queue->Enqueue // this packet with its header to the device queue
+// update the queue when it is full by removing a packet
+Then
+StartAccessIfNeeded ();
+and possibly (in some cases):
+RestartAccessIfNeeded
+are called, and they call
+ChannelAccessManager::RequestAccess
+
+** ChannelAccessManager (channel-access-manager.cc)
+Access to the medium is modelled here.
+In
+ChannelAccessManager::RequestAccess
+either through
+scheduled ChannelAccessManager::GrantPcfAccess (see Schedule (...))
+or
+ChannelAccessManager::DoGrantAccess
+function
+state->NotifyAccessGranted () // Txop::NotifyAccessGranted
+is invoked.
+
+** Txop (txop.cc) (through NotifyAccessGranted at some time)
+In
+Txop::NotifyAccessGranted
+a packet from the queue is taken and prepared for transmission, then
+GetLow ()->StartTransmission (packet or fragment, header, ...)
+is invoked (MacLow::StartTransmission).
+
+** MacLow (mac-low.cc)
+This handles RTS/CTS/DATA/ACK.
+In
+MacLow::StartTransmission
+function
+MacLow::SendDataPacket as well as SendRtsForPacket, SendCtsToSelf etc
+are invoked and then finally:
+ForwardDown (packet, ... )
+which in turn invokes
+m_phy->SendPacket (packet, ... ) // WifiPhy::SendPacket (...)
+
+** WifiPhy (wifi-phy.cc)
+In
+WifiPhy::SendPacket
+<...>
+Time txDuration = CalculateTxDuration
+<...>
+StartTx (newPacket, txVector, txDuration)
+this triggers
+YansWifiPhy::StartTx // WifiPhy::StartTx(...)=0
+Assume that YansWifiPhy is set as a Wi-Fi device, for example, by using:
+YansWifiPhyHelper wifiPhy =  YansWifiPhyHelper::Default ();
+YansWifiChannelHelper wifiChannel;
+
+** YansWifiPhy (yans-wifi-phy.cc)
+In YansWifiPhy::StartTx
+YansWifiChannel::Send (this, packet, power, txDuration)
+
+** YansWifiChannel (yans-wifi-channel.cc)
+In
+YansWifiChannel::Send
+<...>
+// for all devices in m_phyList
+// if not the sender and on the same wi-fi channel
+delay = m_delay->GetDelay (senderMobility, receiverMobility);
+rxPowerDbm = m_loss->CalcRxPower (txPowerDbm, senderMobility, receiverMobility);
+<...>
+Simulator::ScheduleWithContext (dstNode,
+                                delay, &YansWifiChannel::Receive,
+                                (*i), copy, rxPowerDbm, duration);
+where
+"(*i)" is receiving YansWifiPhy instance
+"copy" is the packet
+Thus, this makes the transition from sending to receiving.
+This is because of YansWifiChannel::Receive which is invoked after the time
+specified by duration variable, and in it th
+is function is called:
+WifiPhy::StartReceivePreambleAndHeader
+
+** WifiPhy (wifi-phy.cc)
+In
+WifiPhy::StartReceivePreambleAndHeader
+<...>
+Time endRx = Simulator::Now () + rxDuration;
+<...>
+// then for some states
+StartRx (packet, txVector, mpdutype, rxPowerW, rxDuration, event)
+where (in StartRx)
+<...>
+if (rxPowerW > m_edThresholdW)
+<...>
+preambleAndHeaderDuration = CalculatePlcpPreambleAndHeaderDuration (txVector);
+m_endPlcpRxEvent = Simulator::Schedule (preambleAndHeaderDuration,
+                                        &WifiPhy::StartReceivePacket, this,
+                                        packet, txVector, mpdutype, event);
+<...>
+m_endRxEvent = Simulator::Schedule (rxDuration, &WifiPhy::EndReceive, this,
+                                    packet, preamble, mpdutype, event);
+
+And after preambleAndHeaderDuration in WifiPhy::StartReceivePacket:
+<...>
+CalculatePlcpHeaderSnrPer // SNR (signal noise ratio)
+<...>
+if (m_random->GetValue () > snrPer.per) //plcp reception succeeded
+<...>
+//maybe
+m_plcpSuccess = true;
+
+After rxDuration in WifiPhy::EndReceive:
+<...>
+if (m_plcpSuccess == true)
+<...>
+if (m_random->GetValue () > snrPer.per)
+<...>
+m_state->SwitchFromRxEndOk // WifiPhyStateHelper::SwitchFromRxEndOk
+
+** WifiPhyStateHelper (wifi-phy-state-helper.cc)
+In
+WifiPhyStateHelper::SwitchFromRxEndOk:
+<...>
+m_rxOkCallback (packet, snr, txVector);
+
+And m_rxOkCallback can be set by this chain:
+WifiHelper::Install
+WifiNetDevice::SetPhy
+WifiNetDevice::CompleteConfig
+RegularWifiMac::SetWifiPhy
+MacLow::SetPhy
+callback=MakeCallback (&MacLow::DeaggregateAmpduAndReceive, this)
+WifiPhy::SetReceiveOkCallback (callback)
+WifiPhyStateHelper::SetReceiveOkCallback
+Therefore
+m_rxOkCallback == MacLow::DeaggregateAmpduAndReceive
+
+** MacLow (mac-low.cc)
+In
+MacLow::DeaggregateAmpduAndReceive
+<...>
+// finally invoking
+ReceiveOk (packet, rxSnr, txVector, ampduSubframe);
+In MacLow::ReceiveOk
+// also taking care of CTS/RTS etc
+<...>
+m_rxCallback (packet, &hdr)
+
+Also m_rxCallback is invoked in these functions:
+RxCompleteBufferedPacketsWithSmallerSequence
+RxCompleteBufferedPacketsUntilFirstLost
+
+This callback (m_rxCallback) is set by using SetRxCallback in
+RegularWifiMac::RegularWifiMac:
+m_low->SetRxCallback (MakeCallback (&MacRxMiddle::Receive, m_rxMiddle))
+Thus
+m_rxCallback == MacRxMiddle::Receive
+
+** MacRxMiddle (mac-rx-middle.cc)
+In
+MacRxMiddle::Receive
+there is
+m_callback (aggregate, hdr);
+which is als set in RegularWifiMac::RegularWifiMac:
+SetForwardCallback (MakeCallback (&RegularWifiMac::Receive, this))
+And notice that, presumably, in this case "this" points to an instance of
+the derived class (AdhocWifiMac in this example).
+Thus
+m_callback == AdhocWifiMac::Receive
+
+** AdhocWifiMac (adhoc-wifi-mac.cc)
+In
+Receive
+<...>
+if (hdr->IsQosData () && hdr->IsQosAmsdu ())
+  {
+    NS_LOG_DEBUG ("Received A-MSDU from" << from);
+    DeaggregateAmsduAndForward (packet, hdr);
+  }
+else
+  {
+    ForwardUp (packet, from, to);
+  }
+
+And in DeaggregateAmsduAndForward function RegularWifiMac::ForwardUp is also
+invoked.
+In turn, ForwardUp just call the callback
+m_forwardUp (packet, from, to) which is set
+in WifiNetDevice::CompleteConfig
+by using
+m_mac->SetForwardUpCallback (MakeCallback (&WifiNetDevice::ForwardUp, this));
+And WifiNetDevice can be added during the execution of
+WifiHelper::Install (...)
+(which is in wifi-helper.cc), see
+Ptr<WifiNetDevice> device = CreateObject<WifiNetDevice> ();
+Then during these calls:
+device->SetMac (mac);
+device->SetPhy (phy);
+device->SetRemoteStationManager (manager);
+node->AddDevice (device);
+function CompleteConfig is invoked and the callback is set for
+this WifiNetDevice.
+
+** WifiNetDevice (wifi-net-device.cc)
+ForwardUp
+call m_forwardUp callback which is set
+by
+SetReceiveCallback (MakeCallback (&Node::NonPromiscReceiveFromDevice, this))
+in
+Node::AddDevice
+which can be invoked in WifiHelper::Install (...)
+Thus
+m_forwardUp == Node::NonPromiscReceiveFromDevice
+
+** Node (node.cc)
+In NonPromiscReceiveFromDevice function ReceiveFromDevice is called.
+In ReceiveFromDevice:
+// for each i-th protocol in ProtocolHandlerList
+i->handler (device, packet, protocol, from, to, packetType);
+This invokes the callback stored for each entry in the list, and each
+callback has the type ProtocolHandler.
+The callbacks are set by using
+RegisterProtocolHandler (MakeCallback (&TrafficControlLayer::Receive, tc),
+                                 Ipv4L3Protocol::PROT_NUMBER, device);
+RegisterProtocolHandler (MakeCallback (&TrafficControlLayer::Receive, tc),
+                                   ArpL3Protocol::PROT_NUMBER, device);
+in Ipv4L3Protocol::AddInterface
+which in turn can be invoked in in Ipv4AddressHelper::Assign function call.
+Thus, the received packet is forwarded to TrafficControlLayer::Receive function.
+
+** TrafficControlLayer (traffic-control-layer.cc)
+In Receive the same thing with ProtocolHandlerList is used, i.e.,
+for each matching i-th protocol in ProtocolHandlerList there is a callback:
+i->handler (device, packet, protocol, from, to, packetType);
+The callbacks are set by using
+tc->RegisterProtocolHandler (MakeCallback (&Ipv4L3Protocol::Receive, this),
+                             Ipv4L3Protocol::PROT_NUMBER, device);
+tc->RegisterProtocolHandler (MakeCallback (&ArpL3Protocol::Receive,
+                             PeekPointer (GetObject<ArpL3Protocol> ())),
+                             ArpL3Protocol::PROT_NUMBER, device);
+// Ptr<TrafficControlLayer> tc = m_node->GetObject<TrafficControlLayer> ();
+in Ipv4L3Protocol::AddInterface
+which in turn can be invoked in in Ipv4AddressHelper::Assign function call.
+
+Here ARP handling is not considered, but special packets can be sent according
+to this protocol. In this description mainly the path of the data packet is
+represented. Then only Ipv4L3Protocol::Receive function is further considered.
+
+** Ipv4L3Protocol (ipv4-l3-protocol.cc)
+In Receive:
+<...>
+for (SocketList::iterator i = m_sockets.begin (); i != m_sockets.end (); ++i)
+  {
+    NS_LOG_LOGIC ("Forwarding to raw socket");
+    Ptr<Ipv4RawSocketImpl> socket = *i;
+    socket->ForwardUp (packet, ipHeader, ipv4Interface);
+  }
+/*
+Each raw socket can receive the packet and its data.
+And the list in Ipv4RawSocketImpl (ipv4-raw-socket-impl.cc):
+std::list<struct Data> m_recv;
+accumulates data from all received packets (the items are waiting to be
+processed).
+Thus the end of the packet path can be considered to be here, but UPD packet
+is assumed.
+*/
+<...>
+if (!m_routingProtocol->RouteInput (packet, ipHeader, device,
+MakeCallback (&Ipv4L3Protocol::IpForward, this),
+MakeCallback (&Ipv4L3Protocol::IpMulticastForward, this),
+MakeCallback (&Ipv4L3Protocol::LocalDeliver, this),
+MakeCallback (&Ipv4L3Protocol::RouteInputError, this)
+))
+Thus, routing protocol calls these callbacks.
+Suppose the packet is for this address, then Ipv4L3Protocol::LocalDeliver
+is invoked.
+In
+Ipv4L3Protocol::LocalDeliver:
+<...>
+Ptr<IpL4Protocol> protocol = GetProtocol (ipHeader.GetProtocol (), iif);
+<...>
+protocol->Receive (p, ipHeader, GetInterface (iif));
+
+And protocol can be an instance of UdpL4Protocol, therefore
+UdpL4Protocol::Receive
+is invoked
+
+** UdpL4Protocol (udp-l4-protocol.cc)
+In
+Receive
+<...>
+for (Ipv4EndPointDemux::EndPointsI endPoint = endPoints.begin ();
+     endPoint != endPoints.end (); endPoint++)
+  {
+    (*endPoint)->ForwardUp (packet->Copy (), header, udpHeader.GetSourcePort (),
+                            interface);
+  }
+// for endPoints that match (their are found by Lookup function)
+// (*endPoint)->ForwardUp == Ipv4EndPoint::ForwardUp
+In Ipv4EndPoint::ForwardUp there is a callback m_rxCallback which is set
+by using Ipv4EndPoint::SetRxCallback (which in turn is called through this
+chain: UdpSocketImpl::Bind ==> UdpSocketImpl::FinishBind)
+m_endPoint->SetRxCallback (MakeCallback (&UdpSocketImpl::ForwardUp,
+                                         Ptr<UdpSocketImpl> (this)));
+// m_rxCallback == UdpSocketImpl::ForwardUp
+
+** UdpSocketImpl (udp-socket-impl.cc)
+In
+ForwardUp:
+<...>
+if ((m_rxAvailable + packet->GetSize ()) <= m_rcvBufSize)
+  {
+    Address address = InetSocketAddress (header.GetSource (), port);
+    m_deliveryQueue.push (std::make_pair (packet, address));
+    m_rxAvailable += packet->GetSize ();
+    NotifyDataRecv ();
+  }
+
+Thus the incoming queue m_deliveryQueue is updated by inserting this packet.
+Function NotifyDataRecv invokes a callback that can be set by
+SetRecvCallback, for example:
+in the method of AppExample, for example, in main.cc:
+SetRecvCallback (MakeCallback (&AppExample::ReceivePacket, this));
+
+** Packet is delivered through UDP socket (main.cc)
+
+Thus, the packet is delivered to the application and handled in function
+AppExample::ReceivePacket (this is the callback that triggered by
+UdpSocketImpl::ForwardUp).
+
+* UDP socket
+By default, functions are in udp-socket-impl.cc.
+** Creation
+Example:
+TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+Ptr<Socket> socket = Socket::CreateSocket (node, tid);
+
+Ptr<Socket> of base class Socket is used but
+because of "tid" set to "ns3::UdpSocketFactory", "socket" is of type
+UdpSocketImpl.
+
+*** This is enabled by this scheme.
+<...>
+  CreateAndAggregateObjectFromTypeId (node, "ns3::Ipv4L3Protocol");
+  CreateAndAggregateObjectFromTypeId (node, "ns3::UdpL4Protocol");
+<...>
+In
+Ptr<Socket> socket = Socket::CreateSocket (node, tid);
+there is
+Ptr<SocketFactory> socketFactory = node->GetObject<SocketFactory> (tid);
+s = socketFactory->CreateSocket ();
+
+But tid == "ns3::UdpSocketFactory", therefore socketFactory is of this type.
+This is because in node->AggregateObject
+(inside CreateAndAggregateObjectFromTypeId for "ns3::UdpL4Protocol")
+there are
+Object::NotifyNewAggregate
+and there is an invokation (hidden by a pointer to the base class) of
+UdpL4Protocol::NotifyNewAggregate for an instance of UdpL4Protocol which
+is added by using this code:
+void
+CreateAndAggregateObjectFromTypeId (Ptr<Node> node, const std::string typeId)
+{ // typeId == "ns3::UdpL4Protocol"
+  ObjectFactory factory;
+  factory.SetTypeId (typeId);
+  Ptr<Object> protocol = factory.Create <Object> ();
+  node->AggregateObject (protocol);
+}
+
+variable m_tid is set to "ns3::UdpL4Protocol" therefore
+in
+node->AggregateObject (protocol) function NotifyNewAggregate is called
+for an object with tid == "ns3::UdpL4Protocol" and of type UdpL4Protocol
+because of this code in object-factory.h
+(ObjectFactory::Create is inside CreateAndAggregateObjectFromTypeId):
+<...>
+Ptr<T>
+ObjectFactory::Create (void) const
+{
+  Ptr<Object> object = Create ();
+  return object->GetObject<T> ();
+}
+
+and in object-factory.cc:
+
+Ptr<Object>
+ObjectFactory::Create (void) const
+{
+  NS_LOG_FUNCTION (this);
+  Callback<ObjectBase *> cb = m_tid.GetConstructor ();
+  ObjectBase *base = cb ();
+  Object *derived = dynamic_cast<Object *> (base);
+  NS_ASSERT (derived != 0);
+  derived->SetTypeId (m_tid);
+  derived->Construct (m_parameters);
+  Ptr<Object> object = Ptr<Object> (derived, false);
+  return object;
+}
+
+And here m_tid == "ns3::UdpL4Protocol", see factory.SetTypeId (typeId)
+(in CreateAndAggregateObjectFromTypeId).
+Then the invokation of m_tid.GetConstructor gives the function (functor) that
+makes a new instance of type specified by template
+(in this case UdpL4Protocol because of m_tid)
+and returns ObjectBase pointer. And this function is previously stored
+in TypeId system for m_tid == "ns3::UdpL4Protocol" (and for UdpL4Protocol type).
+See AddConstructor<UdpL4Protocol> in udp-l4-protocol.cc:
+<...>
+NS_OBJECT_ENSURE_REGISTERED (UdpL4Protocol);
+TypeId
+UdpL4Protocol::GetTypeId (void)
+{
+  static TypeId tid = TypeId ("ns3::UdpL4Protocol")
+    .SetParent<IpL4Protocol> ()
+    .SetGroupName ("Internet")
+    .AddConstructor<UdpL4Protocol> ()
+    .AddAttribute ("SocketList", "The list of sockets associated to this protocol.",
+                   ObjectVectorValue (),
+                   MakeObjectVectorAccessor (&UdpL4Protocol::m_sockets),
+                   MakeObjectVectorChecker<UdpSocketImpl> ())
+  ;
+  return tid;
+}
+<...>
+where AddConstructor<UdpL4Protocol> () is used (it is in type-id.h file):
+
+template <typename T>
+TypeId
+TypeId::AddConstructor (void)
+{
+  struct Maker {
+    static ObjectBase * Create () {
+      ObjectBase * base = new T ();
+      return base;
+    }
+  };
+  Callback<ObjectBase *> cb = MakeCallback (&Maker::Create);
+  DoAddConstructor (cb);
+  return *this;
+}
+Function DoAddConstructor actually registers (stores) this function
+(Maker::Create) in the form of a functor by using MakeCallback.
+
+Thus, inside of
+CreateAndAggregateObjectFromTypeId (node, "ns3::UdpL4Protocol")
+and then inside of node->AggregateObject (protocol) there is
+an invokation of UdpL4Protocol::NotifyNewAggregate (among other aggregated
+objects of base type Object), which has this code:
+Ptr<UdpSocketFactoryImpl> udpFactory = CreateObject<UdpSocketFactoryImpl> ();
+udpFactory->SetUdp (this);
+node->AggregateObject (udpFactory);
+This aggregates a factory which can be used to create UDP sockets.
+
+**** Brief description
+There is a chain:
+In CreateAndAggregateObjectFromTypeId:
+
+Ptr<Object> protocol = factory.Create <Object> ();
+
+In factory.Create <Object> ():
+
+Ptr<Object> object = Create ();
+
+which gives an instance of UdpL4Protocol with pointer to base class Object.
+Because factory has TypeId set to "ns3::UdpL4Protocol"
+m_tid.GetConstructor () "makes" the function for creation of an instance
+of UdpL4Protocol (see the detailed description)
+And then in factory.Create <Object> ():
+
+return object->GetObject<T> ();
+
+Here T == Object, see factory.Create <Object> ().
+Therefore object->GetObject<T> () == object.
+This is because of the following. When an instance of Object is created,
+in its constructor Object::Object there is
+
+m_aggregates->n = 1;
+m_aggregates->buffer[0] = this;
+
+and in object->GetObject<T> ():
+
+T *result = dynamic_cast<T *> (m_aggregates->buffer[0]);
+if (result != 0)
+  {
+    return Ptr<T> (result);
+  }
+
+Thus "Ptr<Object> protocol = factory.Create <Object> ();"
+gives us an instance of UdpL4Protocol (because of factory.SetTypeId (typeId)).
+Then
+
+node->AggregateObject (protocol);
+{ ... NotifyNewAggregate (among other objects of base type Object) ... }
+{ ... CreateObject<UdpSocketFactoryImpl> ...
+      node->AggregateObject (udpFactory);
+ ... }
+
+Thus, aggregation of UdpL4Protocol causes aggregation of UdpSocketFactoryImpl.
+Generally, using this method newly aggregated object can make another object
+to be aggregated too.
+Then in main.cc there is an invokation
+
+Ptr<Socket> socket = Socket::CreateSocket (node1, tid);
+{ ...
+Ptr<SocketFactory> socketFactory = node->GetObject<SocketFactory> (tid);
+...
+s = socketFactory->CreateSocket ();
+... }
+
+and socketFactory is of type UdpSocketFactoryImpl because
+tid == "ns3::UdpSocketFactory" and UdpSocketFactoryImpl has been previously
+added by using the above mentioned scheme.
+And it's important that UdpSocketFactoryImpl has tid == "ns3::UdpSocketFactory"
+because it doesn't have function GetTypeId (void) and just inherits it from
+UdpSocketFactory. And GetTypeId is called from base class constructor
+Object::Object when an instance of UdpSocketFactoryImpl is created.
+And GetTypeId is static to allow registering this type before any instance
+is constructed.
+
+In UdpSocketFactoryImpl::CreateSocket
+{ ... m_udp->CreateSocket (); ... } // UdpL4Protocol::CreateSocket
+In UdpL4Protocol::CreateSocket
+{ ... Ptr<UdpSocketImpl> socket = CreateObject<UdpSocketImpl> () ... }
+Therefore socket is of type UdpSocketImpl (this is caused by tid set to
+"ns3::UdpSocketFactory").
+
+When a socket is created is attached to a node, thus you can use:
+socket->GetNode ()
+But normally, you also need to bind this socket to an interface.
+
+** Binding
+You can bind the socket, for example, by the following:
+InetSocketAddress local = InetSocketAddress (address, port);
+socket->Bind (local);
+
+This invokes UdpSocketImpl::Bind and assigns m_endPoint which in turn can
+be used to later access the address (ip, port) bound to this socket.
+Also NS_LOG for Ipv4EndPointDemux to see when a new endpoint is added.
+
+** Sending
+A packet can be sent either by using the pair:
+
+socket->Connect (InetSocketAddress (ip, port));
+socket->Send (packet);
+
+or by using:
+socket->SendTo (packet, 0, address);
+
+The pair Connect-Send is useful when you connect once and then send multiple
+times (the address will be same).
+

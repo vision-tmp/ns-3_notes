@@ -1,6 +1,7 @@
 * Tracing a packet for the case: (UDP, adhoc Wi-Fi, IPv4)
-Here is a brief description of how a packet is sent and received through
-all the layers of the model for a given case (UDP, adhoc Wi-Fi, IPv4).
+Here is a brief description (the detailed description is below) of how
+a packet is sent and received through all the layers of the model
+for a given case (UDP, adhoc Wi-Fi, IPv4).
 Also, see Fig. 1, Fig. 2 of Chapter 17 ("Internet Models")
 and Fig. 1 of Chapter 36 ("Wi-Fi Module")
 in ns-3 Model Library documention (e.g., ns-3-model-library.pdf).
